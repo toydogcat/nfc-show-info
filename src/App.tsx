@@ -25,6 +25,19 @@ interface NDefReadingEvent extends Event {
   };
 }
 
+interface NDEFReaderInstance {
+  scan(): Promise<void>;
+  write(message: { records: Array<{ recordType: string; data: string }> }): Promise<void>;
+  onreading: (event: NDefReadingEvent) => void;
+  onreadingerror: () => void;
+}
+
+declare global {
+  interface Window {
+    NDEFReader?: new () => NDEFReaderInstance;
+  }
+}
+
 interface AttendanceRecord {
   id: string;
   cardName: string;
@@ -54,7 +67,9 @@ export default function App() {
   
   // Real Physics Scan state
   const [isScanning, setIsScanning] = useState(false);
-  const [webNfcSupported, setWebNfcSupported] = useState(false);
+  const [webNfcSupported] = useState<boolean>(() => {
+    return typeof window !== 'undefined' && 'NDEFReader' in window;
+  });
 
   // Simulation, editor, tool states
   const [activeTab, setActiveTab] = useState<'inspector' | 'editor' | 'write' | 'tester' | 'attendance'>('inspector');
@@ -112,15 +127,21 @@ export default function App() {
   const [newStandard, setNewStandard] = useState('ISO/IEC 14443-3 (Type A)');
   const [newLogoType, setNewLogoType] = useState<'easycard' | 'access' | 'machine' | 'amiibo' | 'phone' | 'hotel' | 'generic'>('generic');
 
+  // Add system console logs
+  const addLog = (text: string, type: 'info' | 'warn' | 'success' | 'err' = 'info') => {
+    const timeStr = new Date().toTimeString().split(' ')[0];
+    setConsoleLogs(prev => [{ time: timeStr, type, text }, ...prev.slice(0, 40)]);
+  };
+
   // Detect Web NFC support on load & Setup postMessage
   useEffect(() => {
-    if ('NDEFReader' in window) {
-      setWebNfcSupported(true);
-      addLog('檢測到此設備支援實體感應 Web NFC API！', 'success');
-    } else {
-      setWebNfcSupported(false);
-      addLog('目前設備或瀏覽器不支援 Web NFC 實體讀取。', 'info');
-    }
+    Promise.resolve().then(() => {
+      if ('NDEFReader' in window) {
+        addLog('檢測到此設備支援實體感應 Web NFC API！', 'success');
+      } else {
+        addLog('目前設備或瀏覽器不支援 Web NFC 實體讀取。', 'info');
+      }
+    });
 
     // Luna AI Hub Iframe Protocol
     let lastScrollY = 0;
@@ -144,22 +165,25 @@ export default function App() {
   // Sync edit local states when card changes
   useEffect(() => {
     if (selectedCard) {
-      setEditName(selectedCard.name);
-      setEditUid(selectedCard.uid);
-      setEditType(selectedCard.type);
-      setEditStandard(selectedCard.standard);
-      setEditCapacity(selectedCard.capacity);
-      setEditManufacturer(selectedCard.manufacturer);
-      setEditDesc(selectedCard.description);
-      setEditPayload(selectedCard.payloadString);
-      setEditNote(selectedCard.note || '');
-      setEditLogoType(selectedCard.logoType);
-      
-      setTestingKeyIndex(-1);
-      setTestResultMsg('');
-      setCrackedSectors([]);
+      const card = selectedCard;
+      Promise.resolve().then(() => {
+        setEditName(card.name);
+        setEditUid(card.uid);
+        setEditType(card.type);
+        setEditStandard(card.standard);
+        setEditCapacity(card.capacity);
+        setEditManufacturer(card.manufacturer);
+        setEditDesc(card.description);
+        setEditPayload(card.payloadString);
+        setEditNote(card.note || '');
+        setEditLogoType(card.logoType);
+        
+        setTestingKeyIndex(-1);
+        setTestResultMsg('');
+        setCrackedSectors([]);
+      });
     }
-  }, [selectedCardId, cards]);
+  }, [selectedCard]);
 
   // Persist cards state to localstorage
   const saveCardsList = (updated: NfcCard[]) => {
@@ -179,12 +203,6 @@ export default function App() {
     } catch (e) {
       console.error(e);
     }
-  };
-
-  // Add system console logs
-  const addLog = (text: string, type: 'info' | 'warn' | 'success' | 'err' = 'info') => {
-    const timeStr = new Date().toTimeString().split(' ')[0];
-    setConsoleLogs(prev => [{ time: timeStr, type, text }, ...prev.slice(0, 40)]);
   };
 
   // Handle successful scan (Physical or Mock)
@@ -213,7 +231,10 @@ export default function App() {
       setIsScanning(true);
       addLog('向系統申請感應晶片讀取憑證中...', 'info');
 
-      const reader = new (window as any).NDEFReader();
+      if (!window.NDEFReader) {
+        throw new Error('Web NFC 不支援此瀏覽器');
+      }
+      const reader = new window.NDEFReader();
       await reader.scan();
       
       addLog('物理天線已激活！等待卡片靠近...', 'warn');
@@ -259,8 +280,9 @@ export default function App() {
         handleScanSuccess(newPhysicalCard);
       };
 
-    } catch (err: any) {
-      addLog(`物理感應系統開啟失敗: ${err.message}`, 'err');
+    } catch (err: unknown) {
+      const error = err as Error;
+      addLog(`物理感應系統開啟失敗: ${error.message}`, 'err');
       setIsScanning(false);
     }
   };
@@ -299,11 +321,11 @@ export default function App() {
     else if (ndefWriteType === 'text') compiledPayload = `NDEF TEXT: ${writeTextVal}`;
     else compiledPayload = `NDEF WIFI: SSID="${writeWifiSsid}", Key="${writeWifiPass}"`;
 
-    if ('NDEFReader' in window) {
+    if ('NDEFReader' in window && window.NDEFReader) {
       try {
         setIsWritingPhysical(true);
-        const reader = new (window as any).NDEFReader();
-        let recordObj: any = {};
+        const reader = new window.NDEFReader();
+        let recordObj: { recordType: string; data: string } = { recordType: "text", data: "" };
         if (ndefWriteType === 'url') recordObj = { recordType: "url", data: writeUrlVal };
         else if (ndefWriteType === 'text') recordObj = { recordType: "text", data: writeTextVal };
         else recordObj = { recordType: "text", data: `WIFI:S:${writeWifiSsid};T:WPA;P:${writeWifiPass};;` };
@@ -311,8 +333,9 @@ export default function App() {
         await reader.write({ records: [recordObj] });
         setIsWritingPhysical(false);
         alert('成功！');
-      } catch (err: any) {
-        addLog(`失敗: ${err.message}`, 'err');
+      } catch (err: unknown) {
+        const error = err as Error;
+        addLog(`失敗: ${error.message}`, 'err');
         setIsWritingPhysical(false);
       }
     } else {
@@ -575,7 +598,7 @@ export default function App() {
                   <textarea value={editDesc} onChange={e => setEditDesc(e.target.value)} className="w-full bg-slate-900 border border-white/10 rounded-xl py-2 px-3 text-xs" placeholder="Desc" />
                   <textarea value={editPayload} onChange={e => setEditPayload(e.target.value)} className="w-full bg-slate-900 border border-white/10 rounded-xl py-2 px-3 text-xs" placeholder="Payload" />
                   <textarea value={editNote} onChange={e => setEditNote(e.target.value)} className="w-full bg-slate-900 border border-white/10 rounded-xl py-2 px-3 text-xs" placeholder="Note" />
-                  <select value={editLogoType} onChange={e => setEditLogoType(e.target.value as any)} className="w-full bg-slate-900 border border-white/10 rounded-xl py-2 px-3 text-xs">
+                  <select value={editLogoType} onChange={e => setEditLogoType(e.target.value as NfcCard['logoType'])} className="w-full bg-slate-900 border border-white/10 rounded-xl py-2 px-3 text-xs">
                     <option value="easycard">easycard</option><option value="access">access</option><option value="machine">machine</option><option value="amiibo">amiibo</option><option value="phone">phone</option><option value="hotel">hotel</option><option value="generic">generic</option>
                   </select>
                   <button onClick={handleSaveChanges} className="w-full h-11 bg-cyan-500 text-black font-extrabold text-xs uppercase rounded-xl"><Save className="w-4 h-4 inline mr-2" />儲存</button>
@@ -639,7 +662,7 @@ export default function App() {
                 <input value={newType} onChange={e => setNewType(e.target.value)} className="w-full bg-slate-900 border border-white/10 rounded-xl py-2 px-3 text-xs" placeholder="Type" />
                 <input value={newStandard} onChange={e => setNewStandard(e.target.value)} className="w-full bg-slate-900 border border-white/10 rounded-xl py-2 px-3 text-xs" placeholder="Standard" />
               </div>
-              <select value={newLogoType} onChange={e => setNewLogoType(e.target.value as any)} className="w-full bg-slate-900 border border-white/10 rounded-xl py-2 px-3 text-xs">
+              <select value={newLogoType} onChange={e => setNewLogoType(e.target.value as NfcCard['logoType'])} className="w-full bg-slate-900 border border-white/10 rounded-xl py-2 px-3 text-xs">
                  <option value="easycard">easycard</option><option value="access">access</option><option value="machine">machine</option><option value="amiibo">amiibo</option><option value="phone">phone</option><option value="hotel">hotel</option><option value="generic">generic</option>
               </select>
               <div className="flex gap-2">
